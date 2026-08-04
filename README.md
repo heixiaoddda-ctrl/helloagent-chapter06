@@ -1,3 +1,121 @@
+## 🧩 实测问题与修复记录
+
+本案例在真实运行过程中发现并修复了以下问题（均已解决）：
+
+### 1. AgentScope 版本不兼容（ImportError）
+
+**现象**
+```
+ImportError: cannot import name 'ReActAgent' from 'agentscope.agent'
+```
+
+**原因**：本案例基于 AgentScope **1.x** API 编写（`ReActAgent`、`agentscope.pipeline.MsgHub`），但环境中默认安装了 **2.0.5**。2.x 是完全重写的新架构，删除了 `ReActAgent`，且 `agentscope.pipeline` 模块整体不存在。
+
+**解决**：降级安装
+```bash
+pip install agentscope==1.0.2
+```
+
+### 2. 模型免费额度耗尽（AllocationQuota.FreeTierOnly）
+
+**现象**
+```
+{"code": "AllocationQuota.FreeTierOnly", "message": "Free quota exhausted..."}
+```
+
+**原因**：默认模型 `qwen-max` 的免费额度已用完。
+
+**解决**：更换为有免费额度的模型（实测 `qwen-plus` 可用）。
+
+### 3. 模型名与端点不匹配（url error）
+
+**现象**
+```
+{"code": "InvalidParameter", "message": "url error, please check url！"}
+```
+
+**原因**：`qwen3.7-flash-2026-07-15` / `qwen3.7-flash` 只在**百炼 MaaS compatible-mode 端点**有效，而 agentscope 走的是 **DashScope 原生端点**（`dashscope.aliyuncs.com/api/v1/...`），原生端点不认识这些模型名。
+
+**解决**：使用 DashScope 原生端点可用的模型名（如 `qwen-plus`）。
+
+### 4. thinking 模式与结构化输出冲突
+
+**现象**
+```
+InternalError.Algo.InvalidParameter: The tool_choice parameter does not support
+being set to required or object in thinking mode
+```
+
+**原因**：`structured_model=DiscussionModelCN` 会把 Pydantic schema 转成 `tools` + 强制 `tool_choice`，而 DashScope 在 **thinking 模式（`enable_thinking=True`）下不允许这种 tool_choice**，两者互斥。
+
+**解决**：配置 `enable_thinking=False`。
+
+### 5. 思考过程刷屏（thinking 内容被打印）
+
+**现象**：控制台打印大量英文思考内容
+```
+关羽(thinking): As 关羽 (Guan Yu), I'm a wolf in this Three Kingdoms werewolf game...
+```
+
+**原因**：agentscope 默认 `print` 会把 `thinking` 类型块打印出来；DeepSeek 系列模型即使 `enable_thinking=False` 仍返回思考内容。
+
+**解决**：自定义 `GameReActAgent` 重写 `print` 方法，只打印文本发言，隐藏 thinking（并做了流式增量打印，避免重复输出）。
+
+### 6. 流中断导致崩溃（handle_interrupt TypeError）
+
+**现象**
+```
+TypeError: ReActAgent.handle_interrupt() got an unexpected keyword argument 'structured_model'
+```
+
+**原因**：模型流式响应被中断（`CancelledError`）后，`AgentBase.__call__` 会把原始参数（含 `structured_model`）透传给 `handle_interrupt`，但 `ReActAgent.handle_interrupt` 不接收该参数，直接崩溃。
+
+**解决**：`GameReActAgent` 重写 `handle_interrupt`，兼容任意参数，中断时优雅降级跳过。
+
+### 7. 日志警告刷屏（Unsupported block type）
+
+**现象**
+```
+WARNING | _dashscope_formatter:_format:206 - Unsupported block type thinking in the message, skipped.
+```
+
+**原因**：thinking 块被存入智能体记忆，格式化器拼接对话历史时不支持该块类型，反复打警告。
+
+**解决**：为 agentscope 的 `as` logger 添加日志过滤器，仅屏蔽该条警告。
+
+## 📺 运行效果示例
+
+以下为修复后的预期输出格式（玩家发言为 AI 生成，内容随机）：
+
+```
+🎮 欢迎来到三国狼人杀！
+=== 游戏初始化 ===
+🎮 开始设置三国狼人杀游戏...
+游戏主持人: 📢 【赵云】你在这场三国狼人杀中扮演狼人，你的角色是赵云。夜晚可以击杀一名玩家      
+游戏主持人: 📢 【关羽】你在这场三国狼人杀中扮演狼人，你的角色是关羽。夜晚可以击杀一名玩家      
+游戏主持人: 📢 【刘备】你在这场三国狼人杀中扮演预言家，你的角色是刘备。每晚可以查验一名玩家的身份
+游戏主持人: 📢 【孙权】你在这场三国狼人杀中扮演女巫，你的角色是孙权。拥有解药和毒药各一瓶，可以救人或杀人
+游戏主持人: 📢 【张飞】你在这场三国狼人杀中扮演村民，你的角色是张飞。无特殊技能，依靠推理和投票
+游戏主持人: 📢 【司马懿】你在这场三国狼人杀中扮演村民，你的角色是司马懿。无特殊技能，依靠推理和投票
+游戏主持人: 📢 三国狼人杀游戏开始！参与者：赵云、关羽、刘备、孙权、张飞、司马懿
+✅ 游戏设置完成，共6名玩家
+
+=== 第1轮游戏 ===
+游戏主持人: 📢 🌙 第1夜降临，天黑请闭眼...
+【狼人阶段】
+游戏主持人: 📢 🐺 狼人请睁眼，选择今晚要击杀的目标...
+游戏主持人: 📢 狼人们，请讨论今晚的击杀目标。存活玩家：赵云、关羽、刘备、孙权、张飞、司马懿    
+赵云: 诸位狼兄，吾乃赵云。今夜之选，当以威胁最大者为先。关羽武艺超群，且为人刚正，恐是好人阵营 之领袖；司马懿谋略过人，若为好人，必是我狼族心腹大患。依吾之见，可先除关羽，以断其锋芒，诸位以 为如何？
+关羽: 赵云将军此言差矣！吾关羽行事光明磊落，岂是狼人？若今夜误杀忠良，反让真正的狼人得利。依吾 之见，司马懿此人深藏不露，智谋过人，方是最可疑之人。若他真是好人阵营中的智者，必是狼族之心腹大 患，当先除之。而刘备素有仁德之名，但仁德之辈往往藏奸诈之心，亦不可不防。吾建议今夜先除司马懿， 以绝后患！
+...
+【预言家阶段】
+游戏主持人: 📢 🔮 预言家请睁眼，选择要查验的玩家...
+刘备: 作为蜀汉之主，我刘备深知天下大势。今夜初查，我选择查验司马懿。此人城府极深，善于伪装，在 三国乱世中惯于隐藏真实意图，极有可能是狼人阵营中的一员。若他查验为狼，吾当立即公布，引导诸位识 破其伪装。若为好人，亦可排除一个疑点，为来日布局。我刘备以仁德立世，必当如实禀报查验结果，为天 下苍生求一份清明。
+游戏主持人: 📢 查验结果：司马懿是好人
+【女巫阶段】
+...
+```
+
 # AgentScope 三国狼人杀案例
 
 本目录包含第六章 AgentScope 框架的完整实战案例，展示了如何使用 AgentScope 构建一个融合中国古典文化元素的多智能体在线游戏。
@@ -161,123 +279,6 @@ def get_role_prompt(role: str, character: str) -> str:
     pass
 ```
 
-## 🧩 实测问题与修复记录
-
-本案例在真实运行过程中发现并修复了以下问题（均已解决）：
-
-### 1. AgentScope 版本不兼容（ImportError）
-
-**现象**
-```
-ImportError: cannot import name 'ReActAgent' from 'agentscope.agent'
-```
-
-**原因**：本案例基于 AgentScope **1.x** API 编写（`ReActAgent`、`agentscope.pipeline.MsgHub`），但环境中默认安装了 **2.0.5**。2.x 是完全重写的新架构，删除了 `ReActAgent`，且 `agentscope.pipeline` 模块整体不存在。
-
-**解决**：降级安装
-```bash
-pip install agentscope==1.0.2
-```
-
-### 2. 模型免费额度耗尽（AllocationQuota.FreeTierOnly）
-
-**现象**
-```
-{"code": "AllocationQuota.FreeTierOnly", "message": "Free quota exhausted..."}
-```
-
-**原因**：默认模型 `qwen-max` 的免费额度已用完。
-
-**解决**：更换为有免费额度的模型（实测 `qwen-plus` 可用）。
-
-### 3. 模型名与端点不匹配（url error）
-
-**现象**
-```
-{"code": "InvalidParameter", "message": "url error, please check url！"}
-```
-
-**原因**：`qwen3.7-flash-2026-07-15` / `qwen3.7-flash` 只在**百炼 MaaS compatible-mode 端点**有效，而 agentscope 走的是 **DashScope 原生端点**（`dashscope.aliyuncs.com/api/v1/...`），原生端点不认识这些模型名。
-
-**解决**：使用 DashScope 原生端点可用的模型名（如 `qwen-plus`）。
-
-### 4. thinking 模式与结构化输出冲突
-
-**现象**
-```
-InternalError.Algo.InvalidParameter: The tool_choice parameter does not support
-being set to required or object in thinking mode
-```
-
-**原因**：`structured_model=DiscussionModelCN` 会把 Pydantic schema 转成 `tools` + 强制 `tool_choice`，而 DashScope 在 **thinking 模式（`enable_thinking=True`）下不允许这种 tool_choice**，两者互斥。
-
-**解决**：配置 `enable_thinking=False`。
-
-### 5. 思考过程刷屏（thinking 内容被打印）
-
-**现象**：控制台打印大量英文思考内容
-```
-关羽(thinking): As 关羽 (Guan Yu), I'm a wolf in this Three Kingdoms werewolf game...
-```
-
-**原因**：agentscope 默认 `print` 会把 `thinking` 类型块打印出来；DeepSeek 系列模型即使 `enable_thinking=False` 仍返回思考内容。
-
-**解决**：自定义 `GameReActAgent` 重写 `print` 方法，只打印文本发言，隐藏 thinking（并做了流式增量打印，避免重复输出）。
-
-### 6. 流中断导致崩溃（handle_interrupt TypeError）
-
-**现象**
-```
-TypeError: ReActAgent.handle_interrupt() got an unexpected keyword argument 'structured_model'
-```
-
-**原因**：模型流式响应被中断（`CancelledError`）后，`AgentBase.__call__` 会把原始参数（含 `structured_model`）透传给 `handle_interrupt`，但 `ReActAgent.handle_interrupt` 不接收该参数，直接崩溃。
-
-**解决**：`GameReActAgent` 重写 `handle_interrupt`，兼容任意参数，中断时优雅降级跳过。
-
-### 7. 日志警告刷屏（Unsupported block type）
-
-**现象**
-```
-WARNING | _dashscope_formatter:_format:206 - Unsupported block type thinking in the message, skipped.
-```
-
-**原因**：thinking 块被存入智能体记忆，格式化器拼接对话历史时不支持该块类型，反复打警告。
-
-**解决**：为 agentscope 的 `as` logger 添加日志过滤器，仅屏蔽该条警告。
-
-## 📺 运行效果示例
-
-以下为修复后的预期输出格式（玩家发言为 AI 生成，内容随机）：
-
-```
-🎮 欢迎来到三国狼人杀！
-=== 游戏初始化 ===
-🎮 开始设置三国狼人杀游戏...
-游戏主持人: 📢 【赵云】你在这场三国狼人杀中扮演狼人，你的角色是赵云。夜晚可以击杀一名玩家      
-游戏主持人: 📢 【关羽】你在这场三国狼人杀中扮演狼人，你的角色是关羽。夜晚可以击杀一名玩家      
-游戏主持人: 📢 【刘备】你在这场三国狼人杀中扮演预言家，你的角色是刘备。每晚可以查验一名玩家的身份
-游戏主持人: 📢 【孙权】你在这场三国狼人杀中扮演女巫，你的角色是孙权。拥有解药和毒药各一瓶，可以救人或杀人
-游戏主持人: 📢 【张飞】你在这场三国狼人杀中扮演村民，你的角色是张飞。无特殊技能，依靠推理和投票
-游戏主持人: 📢 【司马懿】你在这场三国狼人杀中扮演村民，你的角色是司马懿。无特殊技能，依靠推理和投票
-游戏主持人: 📢 三国狼人杀游戏开始！参与者：赵云、关羽、刘备、孙权、张飞、司马懿
-✅ 游戏设置完成，共6名玩家
-
-=== 第1轮游戏 ===
-游戏主持人: 📢 🌙 第1夜降临，天黑请闭眼...
-【狼人阶段】
-游戏主持人: 📢 🐺 狼人请睁眼，选择今晚要击杀的目标...
-游戏主持人: 📢 狼人们，请讨论今晚的击杀目标。存活玩家：赵云、关羽、刘备、孙权、张飞、司马懿    
-赵云: 诸位狼兄，吾乃赵云。今夜之选，当以威胁最大者为先。关羽武艺超群，且为人刚正，恐是好人阵营 之领袖；司马懿谋略过人，若为好人，必是我狼族心腹大患。依吾之见，可先除关羽，以断其锋芒，诸位以 为如何？
-关羽: 赵云将军此言差矣！吾关羽行事光明磊落，岂是狼人？若今夜误杀忠良，反让真正的狼人得利。依吾 之见，司马懿此人深藏不露，智谋过人，方是最可疑之人。若他真是好人阵营中的智者，必是狼族之心腹大 患，当先除之。而刘备素有仁德之名，但仁德之辈往往藏奸诈之心，亦不可不防。吾建议今夜先除司马懿， 以绝后患！
-...
-【预言家阶段】
-游戏主持人: 📢 🔮 预言家请睁眼，选择要查验的玩家...
-刘备: 作为蜀汉之主，我刘备深知天下大势。今夜初查，我选择查验司马懿。此人城府极深，善于伪装，在 三国乱世中惯于隐藏真实意图，极有可能是狼人阵营中的一员。若他查验为狼，吾当立即公布，引导诸位识 破其伪装。若为好人，亦可排除一个疑点，为来日布局。我刘备以仁德立世，必当如实禀报查验结果，为天 下苍生求一份清明。
-游戏主持人: 📢 查验结果：司马懿是好人
-【女巫阶段】
-...
-```
 ## ⚠️ 注意事项
 
 1. **agentscope 必须是 1.x**（推荐 1.0.2），2.x 无法运行本案例
