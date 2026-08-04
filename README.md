@@ -24,10 +24,12 @@
 ### 1. 安装依赖
 
 ```bash
-pip install agentscope
+pip install agentscope==1.0.2
 pip install dashscope
 pip install pydantic
 ```
+
+> ⚠️ **注意：agentscope 必须安装 1.x 版本**（本案例基于 1.x API 编写）。2.x 是完全重写的新架构，`ReActAgent`、`agentscope.pipeline.MsgHub` 等已被移除，会直接报 `ImportError`。
 
 ### 2. 配置环境变量
 
@@ -158,6 +160,129 @@ def get_role_prompt(role: str, character: str) -> str:
     # 自定义角色提示词逻辑
     pass
 ```
+
+## 🧩 实测问题与修复记录
+
+本案例在真实运行过程中发现并修复了以下问题（均已解决）：
+
+### 1. AgentScope 版本不兼容（ImportError）
+
+**现象**
+```
+ImportError: cannot import name 'ReActAgent' from 'agentscope.agent'
+```
+
+**原因**：本案例基于 AgentScope **1.x** API 编写（`ReActAgent`、`agentscope.pipeline.MsgHub`），但环境中默认安装了 **2.0.5**。2.x 是完全重写的新架构，删除了 `ReActAgent`，且 `agentscope.pipeline` 模块整体不存在。
+
+**解决**：降级安装
+```bash
+pip install agentscope==1.0.2
+```
+
+### 2. 模型免费额度耗尽（AllocationQuota.FreeTierOnly）
+
+**现象**
+```
+{"code": "AllocationQuota.FreeTierOnly", "message": "Free quota exhausted..."}
+```
+
+**原因**：默认模型 `qwen-max` 的免费额度已用完。
+
+**解决**：更换为有免费额度的模型（实测 `qwen-plus` 可用）。
+
+### 3. 模型名与端点不匹配（url error）
+
+**现象**
+```
+{"code": "InvalidParameter", "message": "url error, please check url！"}
+```
+
+**原因**：`qwen3.7-flash-2026-07-15` / `qwen3.7-flash` 只在**百炼 MaaS compatible-mode 端点**有效，而 agentscope 走的是 **DashScope 原生端点**（`dashscope.aliyuncs.com/api/v1/...`），原生端点不认识这些模型名。
+
+**解决**：使用 DashScope 原生端点可用的模型名（如 `qwen-plus`）。
+
+### 4. thinking 模式与结构化输出冲突
+
+**现象**
+```
+InternalError.Algo.InvalidParameter: The tool_choice parameter does not support
+being set to required or object in thinking mode
+```
+
+**原因**：`structured_model=DiscussionModelCN` 会把 Pydantic schema 转成 `tools` + 强制 `tool_choice`，而 DashScope 在 **thinking 模式（`enable_thinking=True`）下不允许这种 tool_choice**，两者互斥。
+
+**解决**：配置 `enable_thinking=False`。
+
+### 5. 思考过程刷屏（thinking 内容被打印）
+
+**现象**：控制台打印大量英文思考内容
+```
+关羽(thinking): As 关羽 (Guan Yu), I'm a wolf in this Three Kingdoms werewolf game...
+```
+
+**原因**：agentscope 默认 `print` 会把 `thinking` 类型块打印出来；DeepSeek 系列模型即使 `enable_thinking=False` 仍返回思考内容。
+
+**解决**：自定义 `GameReActAgent` 重写 `print` 方法，只打印文本发言，隐藏 thinking（并做了流式增量打印，避免重复输出）。
+
+### 6. 流中断导致崩溃（handle_interrupt TypeError）
+
+**现象**
+```
+TypeError: ReActAgent.handle_interrupt() got an unexpected keyword argument 'structured_model'
+```
+
+**原因**：模型流式响应被中断（`CancelledError`）后，`AgentBase.__call__` 会把原始参数（含 `structured_model`）透传给 `handle_interrupt`，但 `ReActAgent.handle_interrupt` 不接收该参数，直接崩溃。
+
+**解决**：`GameReActAgent` 重写 `handle_interrupt`，兼容任意参数，中断时优雅降级跳过。
+
+### 7. 日志警告刷屏（Unsupported block type）
+
+**现象**
+```
+WARNING | _dashscope_formatter:_format:206 - Unsupported block type thinking in the message, skipped.
+```
+
+**原因**：thinking 块被存入智能体记忆，格式化器拼接对话历史时不支持该块类型，反复打警告。
+
+**解决**：为 agentscope 的 `as` logger 添加日志过滤器，仅屏蔽该条警告。
+
+## 📺 运行效果示例
+
+以下为修复后的预期输出格式（玩家发言为 AI 生成，内容随机）：
+
+```
+🎮 欢迎来到三国狼人杀！
+=== 游戏初始化 ===
+🎮 开始设置三国狼人杀游戏...
+游戏主持人: 📢 【孙权】你在这场三国狼人杀中扮演狼人，你的角色是孙权。夜晚可以击杀一名玩家
+...
+游戏主持人: 📢 三国狼人杀游戏开始！参与者：孙权、周瑜、曹操、张飞、司马懿、赵云
+✅ 游戏设置完成，共6名玩家
+
+=== 第1轮游戏 ===
+【狼人阶段】
+游戏主持人: 📢 🌙 第1夜降临，天黑请闭眼...
+游戏主持人: 📢 🐺 狼人请睁眼，选择今晚要击杀的目标...
+游戏主持人: 📢 狼人们，请讨论今晚的击杀目标。存活玩家：孙权、周瑜、曹操、张飞、司马懿、赵云
+
+孙权: 今晚我们应该除掉周瑜，此人智谋过人，对我们威胁很大。
+周瑜: 孙权，你言之有理。但曹操势力庞大，若不尽早除去，恐对我们不利。
+...
+
+【预言家阶段】
+游戏主持人: 📢 🔮 预言家请睁眼，选择要查验的玩家...
+曹操: 我要查验孙权。
+游戏主持人: 📢 查验结果：孙权是狼人
+```
+
+## ⚠️ 注意事项
+
+1. **agentscope 必须是 1.x**（推荐 1.0.2），2.x 无法运行本案例
+2. **模型名必须在 DashScope 原生端点有效**，`qwen3.7-flash-*` 系列只在 MaaS compatible-mode 端点可用
+3. **`enable_thinking` 必须为 `False`**，否则与结构化输出冲突
+4. **免费额度问题**：不同模型免费额度独立，耗尽后需换模型或充值（`qwen-flash`/`qwen-turbo`/`qwen-max` 实测额度均已耗尽，`qwen-plus` 可用）
+5. **运行前必须设置环境变量** `DASHSCOPE_API_KEY`
+6. **IDE 缓冲问题**：修改文件后若 IDE 有未保存的旧缓冲，可能覆盖最新改动（曾导致 `model_name` 被改回旧值），修改后请确认文件内容已保存
 
 ## 🐛 常见问题
 
